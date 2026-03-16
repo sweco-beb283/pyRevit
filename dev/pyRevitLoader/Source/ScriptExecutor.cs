@@ -13,6 +13,70 @@ using System.Windows.Forms;
 using IronPython.Runtime.Operations;
 
 namespace PyRevitLoader {
+
+    // Writes a durable plain-text execution-error log that is always persisted to disk,
+    // independent of the optional per-run logFilePath supplied to ExecuteScript.
+    //
+    // Log location : %LOCALAPPDATA%\pyRevit\Logs\ExecutionErrors\
+    // File pattern  : execution-errors-YYYY-MM-DD.log   (one rolling file per calendar day)
+    // Line format   : <ISO-8601 timestamp> [<severity>] <engine> | <script> | <message>
+    //                 (newlines inside <message> are escaped as \n so every event is one line)
+    //
+    // The writer is intentionally resilient: every IO / formatting exception is silently
+    // swallowed so that a logging failure can never break command execution.
+    internal static class ExecutionErrorLog {
+        // Subdirectory name used under %LOCALAPPDATA%\pyRevit\
+        private const string LogSubdir = @"pyRevit\Logs\ExecutionErrors";
+
+        // Returns the full path to today's rolling log file.
+        private static string GetLogFilePath() {
+            string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string dir = Path.Combine(localApp, LogSubdir);
+            // Use UTC date so the daily boundary is consistent across time zones and DST changes.
+            string fileName = string.Format("execution-errors-{0}.log", DateTime.UtcNow.ToString("yyyy-MM-dd"));
+            return Path.Combine(dir, fileName);
+        }
+
+        // Appends a single-line entry to the durable log.
+        // severity  : e.g. "ERROR", "CANCEL"
+        // scriptPath: full path of the script being executed (may be null)
+        // engine    : short engine identifier, e.g. "IronPython"
+        // message   : human-readable description; embedded newlines are escaped to \n
+        internal static void Append(string severity, string scriptPath, string engine, string message) {
+            try {
+                string logPath = GetLogFilePath();
+                string dir = Path.GetDirectoryName(logPath);
+                if (!Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                // UTC timestamp so entries are comparable across machines and time zones.
+                string ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                string safePath = string.IsNullOrEmpty(scriptPath) ? "<unknown>" : scriptPath;
+                string safeMsg  = (message ?? string.Empty).Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", @"\n");
+                string safeEngine = string.IsNullOrEmpty(engine) ? "IronPython" : engine;
+
+                string line = string.Format("{0} [{1}] {2} | {3} | {4}{5}",
+                    ts, severity, safeEngine, safePath, safeMsg, Environment.NewLine);
+
+                byte[] bytes = Encoding.UTF8.GetBytes(line);
+
+                // Open with FileShare.ReadWrite so concurrent Revit instances can each append
+                // to the same daily file without locking each other out.  Each Write call on
+                // a FileMode.Append stream is positioned at the current end-of-file by the OS,
+                // which is safe for short single-line payloads on NTFS.
+                using (var fs = new FileStream(logPath,
+                                               FileMode.Append,
+                                               FileAccess.Write,
+                                               FileShare.ReadWrite)) {
+                    fs.Write(bytes, 0, bytes.Length);
+                }
+            }
+            catch {
+                // Never throw from the logger.
+            }
+        }
+    }
+
     // Executes a script
     public class ScriptExecutor {
         private bool _fullframe = false;
@@ -84,6 +148,9 @@ namespace PyRevitLoader {
                     if (logFilePath != null)
                         File.WriteAllText(logFilePath, Message);
 
+                    // Always write a durable entry regardless of whether logFilePath was supplied.
+                    ExecutionErrorLog.Append("CANCEL", sourcePath, "IronPython", Message);
+
                     return Result.Cancelled;
                 }
 
@@ -111,6 +178,9 @@ namespace PyRevitLoader {
                     if (logFilePath != null)
                         File.WriteAllText(logFilePath, Message);
 
+                    // Always write a durable entry regardless of whether logFilePath was supplied.
+                    ExecutionErrorLog.Append("ERROR", sourcePath, "IronPython", Message);
+
                     return Result.Failed;
                 }
                 finally {
@@ -121,6 +191,8 @@ namespace PyRevitLoader {
             }
             catch (Exception ex) {
                 Message = ex.ToString();
+                // Always write a durable entry for host-level failures that bypass the inner try/catch.
+                ExecutionErrorLog.Append("ERROR", sourcePath, "IronPython", Message);
                 return Result.Failed;
             }
         }
