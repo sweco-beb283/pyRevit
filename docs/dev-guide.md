@@ -177,6 +177,51 @@ Currently, you cannot use Visual Studio's "Run" button to debug pyRevit because 
 3. **Attach the Debugger**: Attach the Visual Studio debugger to the `revit.exe` process to start debugging:
    - Go to `Debug` > `Attach to Process...` and select `revit.exe` from the list.
 
+## Execution Error Log
+
+pyRevit writes a durable plain-text log for every IronPython script error that is caught by the host
+(compilation failures, uncaught runtime exceptions, and host-level failures).
+This log is written independently of the per-run `logFilePath` parameter, so it is always populated
+even for scripts launched from the Revit UI where no explicit log path is provided.
+
+### Location
+
+```
+%LOCALAPPDATA%\pyRevit\Logs\ExecutionErrors\execution-errors-YYYY-MM-DD.log
+```
+
+A new file is created for each calendar day (rolling daily log).
+
+### What gets logged
+
+| Scenario | Severity |
+|---|---|
+| IronPython compile / parse failure | `CANCEL` |
+| Uncaught IronPython runtime exception | `ERROR` |
+| Host-level failure (engine init, encoding issue, etc.) | `ERROR` |
+
+### Line format
+
+Each event is written as a single line (timestamps are UTC):
+
+```
+<ISO-8601 timestamp> [<SEVERITY>] <engine> | <script path> | <message (newlines escaped as \n)>
+```
+
+**Example lines:**
+
+```
+2024-06-15T14:23:01.123Z [ERROR] IronPython | C:\MyExt\script.py | IronPython Traceback:\nTraceback (most recent call last):\n  File "script.py", line 42\nNameError: name 'foo' is not defined\n\nScript Executor Traceback:\n...
+2024-06-15T14:25:10.456Z [CANCEL] IronPython | C:\MyExt\bad_syntax.py | IronPython Traceback:\n  File "bad_syntax.py", line 5\n    SyntaxError: unexpected token ':'
+```
+
+### Implementation
+
+The logging is performed by the `ExecutionErrorLog` internal static class in
+`dev/pyRevitLoader/Source/ScriptExecutor.cs`.
+The writer is resilient: any IO or formatting exception is silently swallowed so that a
+logging failure can never break command execution.
+
 ## Conclusion
 
 You're now ready to start contributing to pyRevit! Whether you're fixing bugs, adding new features, or improving documentation, your contributions are valuable. If you have any questions, feel free to reach out to the community through GitHub or other communication channels.
